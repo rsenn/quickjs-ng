@@ -215,6 +215,8 @@ if(M_LIBRARIES OR CMAKE_C_COMPILER_ID STREQUAL "TinyCC")
     list(APPEND qjs_libs m)
 endif()
 
+link_libraries(m)
+
 add_library(qjs ${qjs_sources})
 target_compile_definitions(qjs PRIVATE ${qjs_defines})
 target_include_directories(qjs PUBLIC
@@ -222,6 +224,7 @@ target_include_directories(qjs PUBLIC
     $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
 )
 target_link_libraries(qjs PUBLIC ${qjs_libs})
+set_target_properties(qjs PROPERTIES SOVERSION 1.0)
 
 if(EMSCRIPTEN)
     add_executable(qjs_wasm ${qjs_sources})
