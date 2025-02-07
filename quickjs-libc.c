@@ -190,6 +190,10 @@ static void js_set_thread_state(JSRuntime *rt, JSThreadState *ts)
     js_std_cmd(/*SetOpaque*/1, rt, ts);
 }
 
+#ifdef __GNUC__
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wformat-nonliteral"
+#endif // __GNUC__
 static JSValue js_printf_internal(JSContext *ctx,
                                   int argc, JSValue *argv, FILE *fp)
 {
@@ -207,7 +211,6 @@ static JSValue js_printf_internal(JSContext *ctx,
     int64_t int64_arg;
     double double_arg;
     const char *string_arg;
-    int (*dbuf_printf_fun)(DynBuf *s, const char *fmt, ...) = dbuf_printf;
 
     js_std_dbuf_init(ctx, &dbuf);
 
@@ -332,17 +335,17 @@ static JSValue js_printf_internal(JSContext *ctx,
                     q[0] = '6';
                     q[1] = '4';
                     q[3] = '\0';
-                    dbuf_printf_fun(&dbuf, fmtbuf, (int64_t)int64_arg);
+                    dbuf_printf(&dbuf, fmtbuf, (int64_t)int64_arg);
 #else
                     if (q >= fmtbuf + sizeof(fmtbuf) - 2)
                         goto invalid;
                     q[1] = q[-1];
                     q[-1] = q[0] = 'l';
                     q[2] = '\0';
-                    dbuf_printf_fun(&dbuf, fmtbuf, (long long)int64_arg);
+                    dbuf_printf(&dbuf, fmtbuf, (long long)int64_arg);
 #endif
                 } else {
-                    dbuf_printf_fun(&dbuf, fmtbuf, (int)int64_arg);
+                    dbuf_printf(&dbuf, fmtbuf, (int)int64_arg);
                 }
                 break;
 
@@ -353,7 +356,7 @@ static JSValue js_printf_internal(JSContext *ctx,
                 string_arg = JS_ToCString(ctx, argv[i++]);
                 if (!string_arg)
                     goto fail;
-                dbuf_printf_fun(&dbuf, fmtbuf, string_arg);
+                dbuf_printf(&dbuf, fmtbuf, string_arg);
                 JS_FreeCString(ctx, string_arg);
                 break;
 
@@ -369,7 +372,7 @@ static JSValue js_printf_internal(JSContext *ctx,
                     goto missing;
                 if (JS_ToFloat64(ctx, &double_arg, argv[i++]))
                     goto fail;
-                dbuf_printf_fun(&dbuf, fmtbuf, double_arg);
+                dbuf_printf(&dbuf, fmtbuf, double_arg);
                 break;
 
             case '%':
@@ -406,6 +409,9 @@ fail:
     dbuf_free(&dbuf);
     return JS_EXCEPTION;
 }
+#ifdef __GNUC__
+#pragma GCC diagnostic pop // ignored "-Wformat-nonliteral"
+#endif // __GNUC__
 
 uint8_t *js_load_file(JSContext *ctx, size_t *pbuf_len, const char *filename)
 {
@@ -716,8 +722,10 @@ JSModuleDef *js_module_loader(JSContext *ctx,
         js_free(ctx, buf);
         if (JS_IsException(func_val))
             return NULL;
-        /* XXX: could propagate the exception */
-        js_module_set_import_meta(ctx, func_val, true, false);
+        if (js_module_set_import_meta(ctx, func_val, true, false) < 0) {
+            JS_FreeValue(ctx, func_val);
+            return NULL;
+        }
         /* the module is already referenced, so we must free it */
         m = JS_VALUE_GET_PTR(func_val);
         JS_FreeValue(ctx, func_val);
@@ -900,7 +908,8 @@ static JSValue js_evalScript(JSContext *ctx, JSValue this_val,
         if (JS_ResolveModule(ctx, obj) < 0)
             return JS_EXCEPTION;
 
-        js_module_set_import_meta(ctx, obj, false, false);
+        if (js_module_set_import_meta(ctx, obj, false, false) < 0)
+            return JS_EXCEPTION;
 
         return JS_EvalFunction(ctx, obj);
     }
@@ -1365,8 +1374,8 @@ static JSValue js_std_file_getline(JSContext *ctx, JSValue this_val,
 }
 
 /* XXX: could use less memory and go faster */
-static JSValue js_std_file_readAsString(JSContext *ctx, JSValue this_val,
-                                        int argc, JSValue *argv)
+static JSValue js_std_file_readAs(JSContext *ctx, JSValue this_val,
+                                  int argc, JSValue *argv, int magic)
 {
     FILE *f = js_std_file_get(ctx, this_val);
     int c;
@@ -1402,7 +1411,11 @@ static JSValue js_std_file_readAsString(JSContext *ctx, JSValue this_val,
         }
         max_size--;
     }
-    obj = JS_NewStringLen(ctx, (const char *)dbuf.buf, dbuf.size);
+    if (magic) {
+        obj = JS_NewStringLen(ctx, (const char *)dbuf.buf, dbuf.size);
+    } else {
+        obj = JS_NewArrayBufferCopy(ctx, dbuf.buf, dbuf.size);
+    }
     dbuf_free(&dbuf);
     return obj;
 }
@@ -1694,7 +1707,8 @@ static const JSCFunctionListEntry js_std_file_proto_funcs[] = {
     JS_CFUNC_MAGIC_DEF("read", 3, js_std_file_read_write, 0 ),
     JS_CFUNC_MAGIC_DEF("write", 3, js_std_file_read_write, 1 ),
     JS_CFUNC_DEF("getline", 0, js_std_file_getline ),
-    JS_CFUNC_DEF("readAsString", 0, js_std_file_readAsString ),
+    JS_CFUNC_MAGIC_DEF("readAsArrayBuffer", 0, js_std_file_readAs, 0 ),
+    JS_CFUNC_MAGIC_DEF("readAsString", 0, js_std_file_readAs, 1 ),
     JS_CFUNC_DEF("getByte", 0, js_std_file_getByte ),
     JS_CFUNC_DEF("putByte", 1, js_std_file_putByte ),
     /* setvbuf, ...  */
@@ -3984,12 +3998,20 @@ static JSValue js_print(JSContext *ctx, JSValue this_val,
     DWORD mode;
 #endif
     const char *s;
+    JSValue v;
     DynBuf b;
     int i;
 
     dbuf_init(&b);
     for(i = 0; i < argc; i++) {
-        s = JS_ToCString(ctx, argv[i]);
+        v = argv[i];
+        s = JS_ToCString(ctx, v);
+        if (!s && JS_IsObject(v)) {
+            JS_FreeValue(ctx, JS_GetException(ctx));
+            v = JS_ToObjectString(ctx, v);
+            s = JS_ToCString(ctx, v);
+            JS_FreeValue(ctx, v);
+        }
         if (s) {
             dbuf_printf(&b, "%s%s", &" "[!i], s);
             JS_FreeCString(ctx, s);
@@ -4143,9 +4165,11 @@ static void js_std_dump_error1(JSContext *ctx, JSValue exception_val)
     js_dump_obj(ctx, stderr, exception_val);
     if (is_error) {
         val = JS_GetPropertyStr(ctx, exception_val, "stack");
-        if (!JS_IsUndefined(val)) {
-            js_dump_obj(ctx, stderr, val);
-        }
+    } else {
+        js_std_cmd(/*ErrorBackTrace*/2, ctx, &val);
+    }
+    if (!JS_IsUndefined(val)) {
+        js_dump_obj(ctx, stderr, val);
         JS_FreeValue(ctx, val);
     }
 }
@@ -4244,7 +4268,8 @@ void js_std_eval_binary(JSContext *ctx, const uint8_t *buf, size_t buf_len,
         goto exception;
     if (load_only) {
         if (JS_VALUE_GET_TAG(obj) == JS_TAG_MODULE) {
-            js_module_set_import_meta(ctx, obj, false, false);
+            if (js_module_set_import_meta(ctx, obj, false, false) < 0)
+                goto exception;
         }
     } else {
         if (JS_VALUE_GET_TAG(obj) == JS_TAG_MODULE) {
@@ -4252,7 +4277,8 @@ void js_std_eval_binary(JSContext *ctx, const uint8_t *buf, size_t buf_len,
                 JS_FreeValue(ctx, obj);
                 goto exception;
             }
-            js_module_set_import_meta(ctx, obj, false, true);
+            if (js_module_set_import_meta(ctx, obj, false, true) < 0)
+                goto exception;
             val = JS_EvalFunction(ctx, obj);
             val = js_std_await(ctx, val);
         } else {

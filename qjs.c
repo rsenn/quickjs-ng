@@ -87,7 +87,10 @@ static JSValue load_standalone_module(JSContext *ctx)
         JS_FreeValue(ctx, obj);
         goto exception;
     }
-    js_module_set_import_meta(ctx, obj, false, true);
+    if (js_module_set_import_meta(ctx, obj, false, true) < 0) {
+        JS_FreeValue(ctx, obj);
+        goto exception;
+    }
     val = JS_EvalFunction(ctx, JS_DupValue(ctx, obj));
     val = js_std_await(ctx, val);
 
@@ -107,6 +110,7 @@ static JSValue load_standalone_module(JSContext *ctx)
 static int eval_buf(JSContext *ctx, const void *buf, int buf_len,
                     const char *filename, int eval_flags)
 {
+    bool use_realpath;
     JSValue val;
     int ret;
 
@@ -116,7 +120,12 @@ static int eval_buf(JSContext *ctx, const void *buf, int buf_len,
         val = JS_Eval(ctx, buf, buf_len, filename,
                       eval_flags | JS_EVAL_FLAG_COMPILE_ONLY);
         if (!JS_IsException(val)) {
-            js_module_set_import_meta(ctx, val, true, true);
+            use_realpath = (*filename != '<'); // ex. "<cmdline>"
+            if (js_module_set_import_meta(ctx, val, use_realpath, true) < 0) {
+                js_std_dump_error(ctx);
+                ret = -1;
+                goto end;
+            }
             val = JS_EvalFunction(ctx, val);
         }
         val = js_std_await(ctx, val);
@@ -129,6 +138,7 @@ static int eval_buf(JSContext *ctx, const void *buf, int buf_len,
     } else {
         ret = 0;
     }
+end:
     JS_FreeValue(ctx, val);
     return ret;
 }
@@ -661,7 +671,8 @@ start:
             JS_FreeValue(ctx, args[1]);
             JS_FreeValue(ctx, args[2]);
         } else if (expr) {
-            if (eval_buf(ctx, expr, strlen(expr), "<cmdline>", 0))
+            int flags = module ? JS_EVAL_TYPE_MODULE : 0;
+            if (eval_buf(ctx, expr, strlen(expr), "<cmdline>", flags))
                 goto fail;
         } else if (optind >= argc) {
             /* interactive mode */

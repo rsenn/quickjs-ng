@@ -1,10 +1,10 @@
 /*
  * QuickJS Javascript Engine
  *
- * Copyright (c) 2017-2021 Fabrice Bellard
- * Copyright (c) 2017-2021 Charlie Gordon
- * Copyright (c) 2023 Ben Noordhuis
- * Copyright (c) 2023 Saúl Ibarra Corretgé
+ * Copyright (c) 2017-2024 Fabrice Bellard
+ * Copyright (c) 2017-2024 Charlie Gordon
+ * Copyright (c) 2023-2025 Ben Noordhuis
+ * Copyright (c) 2023-2025 Saúl Ibarra Corretgé
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -36,6 +36,8 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+#define QUICKJS_NG 1
 
 #if defined(__GNUC__) || defined(__clang__)
 #define js_force_inline       inline __attribute__((always_inline))
@@ -104,7 +106,6 @@ enum {
     /* any larger tag is FLOAT64 if JS_NAN_BOXING */
 };
 
-#define JS_FLOAT64_NAN NAN
 #define JSValueConst JSValue /* For backwards compatibility. */
 
 #if defined(JS_NAN_BOXING) && JS_NAN_BOXING
@@ -210,7 +211,7 @@ static inline JSValue JS_MKVAL(int64_t tag, int32_t int32)
 static inline JSValue JS_MKNAN(void)
 {
     JSValue v;
-    v.u.float64 = JS_FLOAT64_NAN;
+    v.u.float64 = NAN;
     v.tag = JS_TAG_FLOAT64;
     return v;
 }
@@ -221,7 +222,7 @@ static inline JSValue JS_MKNAN(void)
 #else
 #define JS_MKPTR(tag, p)   (JSValue){ (JSValueUnion){ .ptr = p }, tag }
 #define JS_MKVAL(tag, val) (JSValue){ (JSValueUnion){ .int32 = val }, tag }
-#define JS_NAN             (JSValue){ (JSValueUnion){ .float64 = JS_FLOAT64_NAN }, JS_TAG_FLOAT64 }
+#define JS_NAN             (JSValue){ (JSValueUnion){ .float64 = NAN }, JS_TAG_FLOAT64 }
 #endif
 
 #define JS_TAG_IS_FLOAT64(tag) ((unsigned)(tag) == JS_TAG_FLOAT64)
@@ -330,6 +331,29 @@ typedef struct JSMallocFunctions {
     size_t (*js_malloc_usable_size)(const void *ptr);
 } JSMallocFunctions;
 
+// Debug trace system: the debug output will be produced to the dump stream (currently
+// stdout) if dumps are enabled and JS_SetDumpFlags is invoked with the corresponding
+// bit set.
+#define JS_DUMP_BYTECODE_FINAL   0x01  /* dump pass 3 final byte code */
+#define JS_DUMP_BYTECODE_PASS2   0x02  /* dump pass 2 code */
+#define JS_DUMP_BYTECODE_PASS1   0x04  /* dump pass 1 code */
+#define JS_DUMP_BYTECODE_HEX     0x10  /* dump bytecode in hex */
+#define JS_DUMP_BYTECODE_PC2LINE 0x20  /* dump line number table */
+#define JS_DUMP_BYTECODE_STACK   0x40  /* dump compute_stack_size */
+#define JS_DUMP_BYTECODE_STEP    0x80  /* dump executed bytecode */
+#define JS_DUMP_READ_OBJECT     0x100  /* dump the marshalled objects at load time */
+#define JS_DUMP_FREE            0x200  /* dump every object free */
+#define JS_DUMP_GC              0x400  /* dump the occurrence of the automatic GC */
+#define JS_DUMP_GC_FREE         0x800  /* dump objects freed by the GC */
+#define JS_DUMP_MODULE_RESOLVE 0x1000  /* dump module resolution steps */
+#define JS_DUMP_PROMISE        0x2000  /* dump promise steps */
+#define JS_DUMP_LEAKS          0x4000  /* dump leaked objects and strings in JS_FreeRuntime */
+#define JS_DUMP_ATOM_LEAKS     0x8000  /* dump leaked atoms in JS_FreeRuntime */
+#define JS_DUMP_MEM           0x10000  /* dump memory usage in JS_FreeRuntime */
+#define JS_DUMP_OBJECTS       0x20000  /* dump objects in JS_FreeRuntime */
+#define JS_DUMP_ATOMS         0x40000  /* dump atoms in JS_FreeRuntime */
+#define JS_DUMP_SHAPES        0x80000  /* dump shapes in JS_FreeRuntime */
+
 // Finalizers run in LIFO order at the very end of JS_FreeRuntime.
 // Intended for cleanup of associated resources; the runtime itself
 // is no longer usable.
@@ -343,6 +367,7 @@ JS_EXTERN void JS_SetRuntimeInfo(JSRuntime *rt, const char *info);
 /* use 0 to disable memory limit */
 JS_EXTERN void JS_SetMemoryLimit(JSRuntime *rt, size_t limit);
 JS_EXTERN void JS_SetDumpFlags(JSRuntime *rt, uint64_t flags);
+JS_EXTERN uint64_t JS_GetDumpFlags(JSRuntime *rt);
 JS_EXTERN size_t JS_GetGCThreshold(JSRuntime *rt);
 JS_EXTERN void JS_SetGCThreshold(JSRuntime *rt, size_t gc_threshold);
 /* use 0 to disable maximum stack size check */
@@ -515,6 +540,16 @@ typedef struct JSClassDef {
        because only a few classes need these methods */
     JSClassExoticMethods *exotic;
 } JSClassDef;
+
+#define JS_EVAL_OPTIONS_VERSION 1
+
+typedef struct JSEvalOptions {
+  int version;
+  int eval_flags;
+  const char *filename;
+  int line_num;
+  // can add new fields in ABI-compatible manner by incrementing JS_EVAL_OPTIONS_VERSION
+} JSEvalOptions;
 
 #define JS_INVALID_CLASS_ID 0
 JS_EXTERN JSClassID JS_NewClassID(JSRuntime *rt, JSClassID *pclass_id);
@@ -693,7 +728,14 @@ JS_EXTERN JSValue JS_NewObjectProtoClass(JSContext *ctx, JSValue proto, JSClassI
 JS_EXTERN JSValue JS_NewObjectClass(JSContext *ctx, int class_id);
 JS_EXTERN JSValue JS_NewObjectProto(JSContext *ctx, JSValue proto);
 JS_EXTERN JSValue JS_NewObject(JSContext *ctx);
+JS_EXTERN JSValue JS_NewObjectFrom(JSContext *ctx, int count,
+                                   const JSAtom *props,
+                                   const JSValue *values);
+JS_EXTERN JSValue JS_NewObjectFromStr(JSContext *ctx, int count,
+                                      const char **props,
+                                      const JSValue *values);
 JS_EXTERN JSValue JS_ToObject(JSContext *ctx, JSValue val);
+JS_EXTERN JSValue JS_ToObjectString(JSContext *ctx, JSValue val);
 
 JS_EXTERN bool JS_IsFunction(JSContext* ctx, JSValue val);
 JS_EXTERN bool JS_IsConstructor(JSContext* ctx, JSValue val);
@@ -703,6 +745,9 @@ JS_EXTERN bool JS_IsRegExp(JSValue val);
 JS_EXTERN bool JS_IsMap(JSValue val);
 
 JS_EXTERN JSValue JS_NewArray(JSContext *ctx);
+// takes ownership of the values
+JS_EXTERN JSValue JS_NewArrayFrom(JSContext *ctx, int count,
+                                  const JSValue *values);
 JS_EXTERN int JS_IsArray(JSContext *ctx, JSValue val);
 
 JS_EXTERN JSValue JS_NewDate(JSContext *ctx, double epoch_ms);
@@ -769,10 +814,14 @@ JS_EXTERN bool JS_DetectModule(const char *input, size_t input_len);
 /* 'input' must be zero terminated i.e. input[input_len] = '\0'. */
 JS_EXTERN JSValue JS_Eval(JSContext *ctx, const char *input, size_t input_len,
                           const char *filename, int eval_flags);
-/* same as JS_Eval() but with an explicit 'this_obj' parameter */
+JS_EXTERN JSValue JS_Eval2(JSContext *ctx, const char *input, size_t input_len,
+                           JSEvalOptions *options);
 JS_EXTERN JSValue JS_EvalThis(JSContext *ctx, JSValue this_obj,
                               const char *input, size_t input_len,
                               const char *filename, int eval_flags);
+JS_EXTERN JSValue JS_EvalThis2(JSContext *ctx, JSValue this_obj,
+                              const char *input, size_t input_len,
+                              JSEvalOptions *options);
 JS_EXTERN JSValue JS_GetGlobalObject(JSContext *ctx);
 JS_EXTERN int JS_IsInstanceOf(JSContext *ctx, JSValue val, JSValue obj);
 JS_EXTERN int JS_DefineProperty(JSContext *ctx, JSValue this_obj,
@@ -972,6 +1021,10 @@ typedef union JSCFunctionType {
 JS_EXTERN JSValue JS_NewCFunction2(JSContext *ctx, JSCFunction *func,
                                    const char *name,
                                    int length, JSCFunctionEnum cproto, int magic);
+JS_EXTERN JSValue JS_NewCFunction3(JSContext *ctx, JSCFunction *func,
+                                   const char *name,
+                                   int length, JSCFunctionEnum cproto, int magic,
+                                   JSValue proto_val);
 JS_EXTERN JSValue JS_NewCFunctionData(JSContext *ctx, JSCFunctionData *func,
                                       int length, int magic, int data_len,
                                       JSValue *data);

@@ -463,26 +463,35 @@ static JSValue js_print_262(JSContext *ctx, JSValue this_val,
                         int argc, JSValue *argv)
 {
     ThreadLocalStorage *tls = JS_GetRuntimeOpaque(JS_GetRuntime(ctx));
+    const char *s;
+    JSValue v;
     int i;
-    const char *str;
 
     for (i = 0; i < argc; i++) {
-        str = JS_ToCString(ctx, argv[i]);
-        if (!str)
+        v = argv[i];
+        s = JS_ToCString(ctx, v);
+        // same logic as js_print in quickjs-libc.c
+        if (local && !s && JS_IsObject(v)) {
+            JS_FreeValue(ctx, JS_GetException(ctx));
+            v = JS_ToObjectString(ctx, v);
+            s = JS_ToCString(ctx, v);
+            JS_FreeValue(ctx, v);
+        }
+        if (!s)
             return JS_EXCEPTION;
-        if (!strcmp(str, "Test262:AsyncTestComplete")) {
+        if (!strcmp(s, "Test262:AsyncTestComplete")) {
             tls->async_done++;
-        } else if (js__strstart(str, "Test262:AsyncTestFailure", NULL)) {
+        } else if (js__strstart(s, "Test262:AsyncTestFailure", NULL)) {
             tls->async_done = 2; /* force an error */
         }
         if (outfile) {
             if (i != 0)
                 fputc(' ', outfile);
-            fputs(str, outfile);
+            fputs(s, outfile);
         }
         if (verbose > 1)
-            printf("%s%s", &" "[i < 1], str);
-        JS_FreeCString(ctx, str);
+            printf("%s%s", &" "[i < 1], s);
+        JS_FreeCString(ctx, s);
     }
     if (outfile)
         fputc('\n', outfile);
@@ -922,36 +931,33 @@ static JSValue js_IsHTMLDDA(JSContext *ctx, JSValue this_val,
 static JSValue add_helpers1(JSContext *ctx)
 {
     JSValue global_obj;
-    JSValue obj262, obj;
+    JSValue obj262, is_html_dda;
 
     global_obj = JS_GetGlobalObject(ctx);
 
     JS_SetPropertyStr(ctx, global_obj, "print",
                       JS_NewCFunction(ctx, js_print_262, "print", 1));
 
+    is_html_dda = JS_NewCFunction(ctx, js_IsHTMLDDA, "IsHTMLDDA", 0);
+    JS_SetIsHTMLDDA(ctx, is_html_dda);
+#define N 7
+    static const char *props[N] = {
+        "detachArrayBuffer", "evalScript", "codePointRange",
+        "agent", "global", "createRealm", "IsHTMLDDA",
+    };
+    JSValue values[N] = {
+        JS_NewCFunction(ctx, js_detachArrayBuffer, "detachArrayBuffer", 1),
+        JS_NewCFunction(ctx, js_evalScript_262, "evalScript", 1),
+        JS_NewCFunction(ctx, js_string_codePointRange, "codePointRange", 2),
+        js_new_agent(ctx),
+        JS_DupValue(ctx, global_obj),
+        JS_NewCFunction(ctx, js_createRealm, "createRealm", 0),
+        is_html_dda,
+    };
     /* $262 special object used by the tests */
-    obj262 = JS_NewObject(ctx);
-    JS_SetPropertyStr(ctx, obj262, "detachArrayBuffer",
-                      JS_NewCFunction(ctx, js_detachArrayBuffer,
-                                      "detachArrayBuffer", 1));
-    JS_SetPropertyStr(ctx, obj262, "evalScript",
-                      JS_NewCFunction(ctx, js_evalScript_262,
-                                      "evalScript", 1));
-    JS_SetPropertyStr(ctx, obj262, "codePointRange",
-                      JS_NewCFunction(ctx, js_string_codePointRange,
-                                      "codePointRange", 2));
-    JS_SetPropertyStr(ctx, obj262, "agent", js_new_agent(ctx));
-
-    JS_SetPropertyStr(ctx, obj262, "global",
-                      JS_DupValue(ctx, global_obj));
-    JS_SetPropertyStr(ctx, obj262, "createRealm",
-                      JS_NewCFunction(ctx, js_createRealm,
-                                      "createRealm", 0));
-    obj = JS_NewCFunction(ctx, js_IsHTMLDDA, "IsHTMLDDA", 0);
-    JS_SetIsHTMLDDA(ctx, obj);
-    JS_SetPropertyStr(ctx, obj262, "IsHTMLDDA", obj);
-
+    obj262 = JS_NewObjectFromStr(ctx, N, props, values);
     JS_SetPropertyStr(ctx, global_obj, "$262", JS_DupValue(ctx, obj262));
+#undef N
 
     JS_FreeValue(ctx, global_obj);
     return obj262;
@@ -1056,8 +1062,9 @@ void update_exclude_dirs(void)
     namelist_t *lp = &test_list;
     namelist_t *ep = &exclude_list;
     namelist_t *dp = &exclude_dir_list;
-    char *name;
+    char *name, *path;
     int i, j, count;
+    size_t include, exclude;
 
     /* split directpries from exclude_list */
     for (count = i = 0; i < ep->count; i++) {
@@ -1076,15 +1083,19 @@ void update_exclude_dirs(void)
     /* filter out excluded directories */
     for (count = i = 0; i < lp->count; i++) {
         name = lp->array[i];
+        include = exclude = 0;
         for (j = 0; j < dp->count; j++) {
-            if (has_prefix(name, dp->array[j])) {
-                test_excluded++;
-                free(name);
-                name = NULL;
-                break;
-            }
+            path = dp->array[j];
+            if (has_prefix(name, path))
+                exclude = strlen(path);
+            if (*path == '!' && has_prefix(name, &path[1]))
+                include = strlen(&path[1]);
         }
-        if (name) {
+        // most specific include/exclude wins
+        if (exclude > include) {
+            test_excluded++;
+            free(name);
+        } else {
             lp->array[count++] = name;
         }
     }

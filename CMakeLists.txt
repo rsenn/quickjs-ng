@@ -31,13 +31,15 @@ if(NOT MSVC AND NOT IOS)
     xcheck_add_c_compiler_flag(-Werror)
     xcheck_add_c_compiler_flag(-Wextra)
 endif()
+xcheck_add_c_compiler_flag(-Wformat=2)
 xcheck_add_c_compiler_flag(-Wno-implicit-fallthrough)
 xcheck_add_c_compiler_flag(-Wno-sign-compare)
 xcheck_add_c_compiler_flag(-Wno-missing-field-initializers)
 xcheck_add_c_compiler_flag(-Wno-unused-parameter)
 xcheck_add_c_compiler_flag(-Wno-unused-but-set-variable)
+xcheck_add_c_compiler_flag(-Wno-unused-result)
+xcheck_add_c_compiler_flag(-Wno-stringop-truncation)
 xcheck_add_c_compiler_flag(-Wno-array-bounds)
-xcheck_add_c_compiler_flag(-Wno-format-truncation)
 xcheck_add_c_compiler_flag(-funsigned-char)
 
 # ClangCL is command line compatible with MSVC, so 'MSVC' is set.
@@ -187,6 +189,14 @@ macro(add_qjs_libc_if_needed target)
         target_sources(${target} PRIVATE quickjs-libc.c)
     endif()
 endmacro()
+macro(add_static_if_needed target)
+    if(BUILD_STATIC_QJS_EXE OR MINGW)
+        target_link_options(${target} PRIVATE -static)
+        if(MINGW)
+            target_link_options(${target} PRIVATE -static-libgcc)
+        endif()
+    endif()
+endmacro()
 
 set(qjs_sources
     cutils.c
@@ -252,6 +262,7 @@ add_executable(qjsc
     qjsc.c
 )
 add_qjs_libc_if_needed(qjsc)
+add_static_if_needed(qjsc)
 target_compile_definitions(qjsc PRIVATE ${qjs_defines})
 target_link_libraries(qjsc qjs)
 
@@ -265,17 +276,12 @@ add_executable(qjs_exe
     qjs.c
 )
 add_qjs_libc_if_needed(qjs_exe)
+add_static_if_needed(qjs_exe)
 set_target_properties(qjs_exe PROPERTIES
     OUTPUT_NAME "qjs"
 )
 target_compile_definitions(qjs_exe PRIVATE ${qjs_defines})
 target_link_libraries(qjs_exe qjs)
-if(BUILD_STATIC_QJS_EXE OR MINGW)
-    target_link_options(qjs_exe PRIVATE -static)
-    if(MINGW)
-        target_link_options(qjs_exe PRIVATE -static-libgcc)
-    endif()
-endif()
 if(NOT WIN32)
     set_target_properties(qjs_exe PROPERTIES ENABLE_EXPORTS TRUE)
 endif()
@@ -300,6 +306,15 @@ if(NOT EMSCRIPTEN)
     target_compile_definitions(run-test262 PRIVATE ${qjs_defines})
     target_link_libraries(run-test262 qjs)
 endif()
+
+# Interrupt test
+#
+
+add_executable(interrupt-test
+    interrupt-test.c
+)
+target_compile_definitions(interrupt-test PRIVATE ${qjs_defines})
+target_link_libraries(interrupt-test qjs)
 
 # Unicode generator
 #
